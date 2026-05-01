@@ -1,0 +1,6 @@
+{
+  "checkpoint_dir": "/data/users/zheng/projects/courses/EEA289/EEC289A_Robotics-Homework/{CHECKPOINT_DIR}",
+  "stage_name": "stage_2",
+  "render_steps": 0,
+  "force_cpu": false
+}

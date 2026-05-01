@@ -1,0 +1,21 @@
+2026-05-01 13:56:17,608 INFO    MainThread:332581 [wandb_setup.py:_flush():81] Current SDK version is 0.26.1
+2026-05-01 13:56:17,608 INFO    MainThread:332581 [wandb_setup.py:_flush():81] Configure stats pid to 332581
+2026-05-01 13:56:17,608 INFO    MainThread:332581 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-05-01 13:56:17,608 INFO    MainThread:332581 [wandb_init.py:setup_run_log_directory():723] Logging user logs to /data/users/zheng/projects/courses/EEC289/EEC289A_Robotics-Homework/wandb/offline-run-20260501_135617-eof8x1zv/logs/debug.log
+2026-05-01 13:56:17,608 INFO    MainThread:332581 [wandb_init.py:setup_run_log_directory():724] Logging internal logs to /data/users/zheng/projects/courses/EEC289/EEC289A_Robotics-Homework/wandb/offline-run-20260501_135617-eof8x1zv/logs/debug-internal.log
+2026-05-01 13:56:17,608 INFO    MainThread:332581 [wandb_init.py:init():850] calling init triggers
+2026-05-01 13:56:17,609 INFO    MainThread:332581 [wandb_init.py:init():855] wandb.init called with sweep_config: {}
+config: {'stages': ['stage_1', 'stage_2'], 'run_name': 'run_v7', 'homework_name': 'Homework: Sim-to-Real Quadruped Locomotion with MuJoCo Playground', 'robot': 'Go2', 'environment_name': 'Go2JoystickFlatTerrain', 'framework': 'MuJoCo Playground + Brax PPO + MJX', 'backend_impl': 'jax', 'actor_obs_key': 'state', 'critic_obs_key': 'privileged_state', 'use_domain_randomization': True, 'seed': 0, '_wandb': {}}
+2026-05-01 13:56:17,609 INFO    MainThread:332581 [wandb_init.py:init():898] starting backend
+2026-05-01 13:56:17,889 INFO    MainThread:332581 [wandb_init.py:init():913] sending inform_init request
+2026-05-01 13:56:18,157 INFO    MainThread:332581 [wandb_init.py:init():918] backend started and connected
+2026-05-01 13:56:18,178 INFO    MainThread:332581 [wandb_init.py:init():988] updated telemetry
+2026-05-01 13:56:18,186 INFO    MainThread:332581 [wandb_init.py:init():1011] communicating run to backend with 90.0 second timeout
+2026-05-01 13:56:18,194 INFO    MainThread:332581 [wandb_init.py:init():1056] starting run threads in backend
+2026-05-01 13:56:18,266 INFO    MainThread:332581 [wandb_run.py:_console_start():2554] atexit reg
+2026-05-01 13:56:18,266 INFO    MainThread:332581 [wandb_run.py:_redirect():2403] redirect: wrap_raw
+2026-05-01 13:56:18,266 INFO    MainThread:332581 [wandb_run.py:_redirect():2472] Wrapping output streams.
+2026-05-01 13:56:18,266 INFO    MainThread:332581 [wandb_run.py:_redirect():2495] Redirects installed.
+2026-05-01 13:56:18,268 INFO    MainThread:332581 [wandb_init.py:init():1094] run started, returning control to user process
+2026-05-01 13:56:22,451 INFO    wandb-AsyncioManager-main:332581 [service_client.py:_forward_responses():134] Reached EOF.
+2026-05-01 13:56:22,452 INFO    wandb-AsyncioManager-main:332581 [mailbox.py:close():155] Closing mailbox, abandoning 0 handles.

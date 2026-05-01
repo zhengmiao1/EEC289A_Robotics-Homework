@@ -22,6 +22,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from tqdm import tqdm
+
+try:
+    import wandb as _wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    _wandb = None
+    _WANDB_AVAILABLE = False
+
 from course_common import (
     DEFAULT_CONFIG_PATH,
     apply_stage_config,
@@ -96,6 +105,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-updates-per-batch", type=int, default=None, help="Override PPO num_updates_per_batch.")
 
     parser.add_argument("--force-cpu", action="store_true", help="Force JAX onto CPU.")
+    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging.")
+    parser.add_argument("--wandb-project", type=str, default="go2-locomotion", help="W&B project name.")
+    parser.add_argument("--wandb-run-name", type=str, default=None, help="W&B run name (default: output dir basename).")
     parser.add_argument(
         "--restore-checkpoint-dir",
         type=Path,
@@ -195,6 +207,7 @@ def run_stage(
     stage_name: str,
     output_dir: Path,
     restore_checkpoint_path: Path | None,
+    wandb_run: Any = None,
 ) -> dict[str, Any]:
     """Train one curriculum stage and export the selected checkpoint."""
     ppo_networks = stack["ppo_networks"]
@@ -225,8 +238,11 @@ def run_stage(
 
     progress_history: list[dict[str, Any]] = []
     timing_points = [time.monotonic()]
+    pbar: tqdm | None = None
+    _prev_steps = [0]
 
     def progress_fn(num_steps: int, metrics: dict[str, Any]) -> None:
+        nonlocal pbar
         timing_points.append(time.monotonic())
         record = {
             "num_steps": int(num_steps),
@@ -236,11 +252,22 @@ def run_stage(
         save_json(stage_dir / "progress_live.json", progress_history)
         save_json(stage_dir / "latest_metrics.json", record)
 
+        if wandb_run is not None:
+            log_data = {f"{stage_name}/{k}": v for k, v in to_jsonable(metrics).items()}
+            log_data["global_step"] = int(num_steps)
+            log_data[f"{stage_name}/num_steps"] = int(num_steps)
+            wandb_run.log(log_data)
+
+        delta = num_steps - _prev_steps[0]
+        _prev_steps[0] = num_steps
+        postfix: dict[str, str] = {}
         reward = metrics.get("eval/episode_reward")
-        if reward is None:
-            print(f"[{stage_name}] steps={num_steps}", flush=True)
-        else:
-            print(f"[{stage_name}] steps={num_steps} eval_reward={float(reward):.3f}", flush=True)
+        if reward is not None:
+            postfix["reward"] = f"{float(reward):.3f}"
+        if pbar is not None:
+            pbar.set_description(f"[{stage_name}]")
+            pbar.set_postfix(postfix)
+            pbar.update(delta)
 
     training_params = dict(ppo_cfg)
     if "network_factory" in training_params:
@@ -279,6 +306,13 @@ def run_stage(
     if restore_checkpoint_path is not None:
         print(f"[{stage_name}] restoring from checkpoint: {restore_checkpoint_path}", flush=True)
 
+    pbar = tqdm(
+        total=int(ppo_cfg.num_timesteps),
+        unit="steps",
+        desc=f"[{stage_name}] compiling",
+        dynamic_ncols=True,
+    )
+
     train_kwargs = dict(
         training_params,
         network_factory=network_factory,
@@ -298,6 +332,7 @@ def run_stage(
         eval_env=eval_env,
         progress_fn=progress_fn,
     )
+    pbar.close()
     _ = make_inference_fn, params  # Explicitly show that training returned a policy.
 
     latest_checkpoint = resolve_latest_checkpoint_dir(checkpoint_root)
@@ -371,6 +406,24 @@ def main() -> None:
     if args.restore_checkpoint_dir:
         print(f"[run] initial restore checkpoint={args.restore_checkpoint_dir.resolve()}", flush=True)
 
+    wandb_run = None
+    if args.wandb:
+        if not _WANDB_AVAILABLE:
+            print("[wandb] wandb not installed, skipping. Run: pip install wandb", flush=True)
+        else:
+            run_name = args.wandb_run_name or output_dir.name
+            wandb_run = _wandb.init(
+                project=args.wandb_project,
+                name=run_name,
+                config={
+                    "stages": selected_stages,
+                    "run_name": output_dir.name,
+                    **{k: v for k, v in config.items() if isinstance(v, (str, int, float, bool))},
+                },
+                resume="allow",
+            )
+            print(f"[wandb] run: {wandb_run.url}", flush=True)
+
     stack = lazy_import_stack()
 
     restore_checkpoint_path: Path | None = args.restore_checkpoint_dir.resolve() if args.restore_checkpoint_dir else None
@@ -397,6 +450,7 @@ def main() -> None:
             stage_name=stage_name,
             output_dir=output_dir,
             restore_checkpoint_path=restore_checkpoint_path,
+            wandb_run=wandb_run,
         )
         stage_summaries.append(summary)
 
@@ -410,6 +464,9 @@ def main() -> None:
     run_metadata["wallclock_sec"] = run_metadata["finished_at_unix"] - run_metadata["started_at_unix"]
     run_metadata["stage_summaries"] = stage_summaries
     save_json(output_dir / "run_metadata.json", run_metadata)
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
     print(json.dumps(run_metadata, indent=2, ensure_ascii=False), flush=True)
 

@@ -169,6 +169,8 @@ def main() -> None:
     else:
         segment_steps = seconds_to_steps(config["demo_rollout"]["segment_seconds"], env.dt)
         total_steps = int(segment_steps * len(demo_segments))
+    if args.render_steps > 0:
+        segment_steps = max(1, total_steps // len(demo_segments))
 
     rng = jax.random.PRNGKey(int(config["seed"]) + 123)
     state = reset_fn(rng)
@@ -183,13 +185,17 @@ def main() -> None:
     joint_velocities = []
     foot_slip_speed = []
     fell = []
+    segment_ids = []
+    base_xy_world = []
 
     done_step = None
     start_x = _safe_float(state.data.qpos[0])
     start_y = _safe_float(state.data.qpos[1])
+    initial_xy = np.asarray([start_x, start_y], dtype=np.float32)
 
     for step_idx in range(total_steps):
         command = command_for_step(demo_segments, step_idx, total_steps)
+        segment_idx = min(len(demo_segments) - 1, step_idx // segment_steps)
         state = _force_command(state, command, jax)
 
         rng, act_key = jax.random.split(rng)
@@ -207,6 +213,8 @@ def main() -> None:
         joint_velocities.append(np.asarray(state.data.qvel[6:], dtype=np.float32))
         feet_vel = np.asarray(state.data.sensordata[env._foot_linvel_sensor_adr], dtype=np.float32)
         foot_slip_speed.append(np.linalg.norm(feet_vel[:, :2], axis=-1).astype(np.float32))
+        segment_ids.append(segment_idx)
+        base_xy_world.append(np.asarray(state.data.qpos[:2], dtype=np.float32))
 
         state_done = bool(np.asarray(state.done))
         fell.append(state_done)
@@ -225,18 +233,49 @@ def main() -> None:
 
     rollout_npz = output_dir / "rollout_public_eval.npz"
     num_samples = len(command_xy)
+    command_xy_arr = np.asarray(command_xy, dtype=np.float32)
+    measured_xy_arr = np.asarray(measured_xy, dtype=np.float32)
+    command_yaw_arr = np.asarray(command_yaw, dtype=np.float32)
+    measured_yaw_arr = np.asarray(measured_yaw, dtype=np.float32)
+    segment_ids_arr = np.asarray(segment_ids, dtype=np.int32)
+    base_xy_world_arr = np.asarray(base_xy_world, dtype=np.float32)
     np.savez(
         rollout_npz,
         episode_id=np.zeros(num_samples, dtype=np.int32),
-        command_lin_vel_xy=np.asarray(command_xy, dtype=np.float32),
-        measured_lin_vel_xy=np.asarray(measured_xy, dtype=np.float32),
-        command_yaw_rate=np.asarray(command_yaw, dtype=np.float32),
-        measured_yaw_rate=np.asarray(measured_yaw, dtype=np.float32),
+        command_lin_vel_xy=command_xy_arr,
+        measured_lin_vel_xy=measured_xy_arr,
+        command_yaw_rate=command_yaw_arr,
+        measured_yaw_rate=measured_yaw_arr,
         fell=np.asarray(fell, dtype=bool),
         joint_torques=np.asarray(joint_torques, dtype=np.float32),
         joint_velocities=np.asarray(joint_velocities, dtype=np.float32),
         foot_slip_speed=np.asarray(foot_slip_speed, dtype=np.float32),
+        segment_id=segment_ids_arr,
+        base_xy_world=base_xy_world_arr,
     )
+
+    per_segment_summary = []
+    for segment_idx, segment_command in enumerate(demo_segments):
+        idxs = np.nonzero(segment_ids_arr == segment_idx)[0]
+        if idxs.size == 0:
+            continue
+        seg_start = initial_xy if idxs[0] == 0 else base_xy_world_arr[idxs[0] - 1]
+        seg_end = base_xy_world_arr[idxs[-1]]
+        per_segment_summary.append(
+            {
+                "segment_idx": int(segment_idx),
+                "command": [float(x) for x in segment_command],
+                "num_steps": int(idxs.size),
+                "mean_measured_vx": float(np.mean(measured_xy_arr[idxs, 0])),
+                "mean_measured_vy": float(np.mean(measured_xy_arr[idxs, 1])),
+                "mean_measured_yaw": float(np.mean(measured_yaw_arr[idxs])),
+                "mean_abs_vx_error": float(np.mean(np.abs(command_xy_arr[idxs, 0] - measured_xy_arr[idxs, 0]))),
+                "mean_abs_vy_error": float(np.mean(np.abs(command_xy_arr[idxs, 1] - measured_xy_arr[idxs, 1]))),
+                "mean_abs_yaw_error": float(np.mean(np.abs(command_yaw_arr[idxs] - measured_yaw_arr[idxs]))),
+                "world_dx_m": float(seg_end[0] - seg_start[0]),
+                "world_dy_m": float(seg_end[1] - seg_start[1]),
+            }
+        )
 
     final_state = trajectory[-1]
     rollout_summary = {
@@ -248,10 +287,16 @@ def main() -> None:
         "x_distance_m": _safe_float(final_state.data.qpos[0] - start_x),
         "y_offset_m": _safe_float(final_state.data.qpos[1] - start_y),
         "final_base_height_m": _safe_float(final_state.data.qpos[2]),
-        "mean_command_vx": float(np.mean(np.asarray(command_xy)[:, 0])) if num_samples else 0.0,
-        "mean_measured_vx": float(np.mean(np.asarray(measured_xy)[:, 0])) if num_samples else 0.0,
-        "mean_abs_yaw_error": float(np.mean(np.abs(np.asarray(command_yaw) - np.asarray(measured_yaw)))) if num_samples else 0.0,
+        "mean_command_vx": float(np.mean(command_xy_arr[:, 0])) if num_samples else 0.0,
+        "mean_measured_vx": float(np.mean(measured_xy_arr[:, 0])) if num_samples else 0.0,
+        "mean_command_vy": float(np.mean(command_xy_arr[:, 1])) if num_samples else 0.0,
+        "mean_measured_vy": float(np.mean(measured_xy_arr[:, 1])) if num_samples else 0.0,
+        "mean_abs_vx_error": float(np.mean(np.abs(command_xy_arr[:, 0] - measured_xy_arr[:, 0]))) if num_samples else 0.0,
+        "mean_abs_vy_error": float(np.mean(np.abs(command_xy_arr[:, 1] - measured_xy_arr[:, 1]))) if num_samples else 0.0,
+        "mean_abs_yaw_error": float(np.mean(np.abs(command_yaw_arr - measured_yaw_arr))) if num_samples else 0.0,
         "demo_segments": demo_segments,
+        "segment_steps": int(segment_steps),
+        "per_segment_summary": per_segment_summary,
     }
     save_json(output_dir / "demo_summary.json", rollout_summary)
 

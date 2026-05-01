@@ -41,23 +41,13 @@ ACTOR_OBS_SIZE = 48
 CRITIC_OBS_SIZE = 123
 ACTION_SIZE = 12
 
-# Single-axis curriculum used in stage_1.
-_AXIS_ONLY_MOTION_PATTERNS = jp.array([
-    [1., 0., 0.],  # vx only
-    [0., 1., 0.],  # vy only
-    [0., 0., 1.],  # yaw only
+# 3 种纯轴运动模式，各占 1/3 概率 (33%)
+# 只训练单轴指令，避免混合运动干扰学习
+_STAGE2_MOTION_PATTERNS = jp.array([
+    [1., 0., 0.],  # 纯前进/后退 (vx only)
+    [0., 1., 0.],  # 纯左右平移 (vy only)
+    [0., 0., 1.],  # 纯转弯 (yaw only)
 ], dtype=jp.float32)
-
-# Stage 2 keeps pure commands, but only mixes yaw with one translation axis.
-# This avoids teaching forward motion together with lateral drift.
-_STAGE2_COMMAND_MASKS = jp.array([
-    [1., 0., 0.],  # vx only
-    [0., 1., 0.],  # vy only
-    [0., 0., 1.],  # yaw only
-    [1., 0., 1.],  # vx + yaw
-    [0., 1., 1.],  # vy + yaw
-], dtype=jp.float32)
-_STAGE2_COMMAND_MASK_LOGITS = jp.log(jp.array([0.28, 0.28, 0.14, 0.18, 0.12], dtype=jp.float32))
 
 
 def default_config() -> config_dict.ConfigDict:
@@ -117,8 +107,8 @@ def default_config() -> config_dict.ConfigDict:
             # Command sampling ranges for [vx, vy, yaw_rate]
             min=[-1.0, -0.4, -1.0],
             max=[1.0, 0.4, 1.0],
-            # Stage-specific masking / mixing happens in reset/sample_command.
-            b=[1.0, 1.0, 1.0],
+            # Probability that each command channel stays active
+            b=[0.9, 0.25, 0.5],
             # Stage metadata is injected from configs/course_config.json.
             stage_name="stage_1",
             student_stage2_goal_min=[-1.0, -0.4, -1.0],
@@ -259,7 +249,14 @@ class Joystick(go2_base.Go2Env):
         rng, key1, key2, key3 = jax.random.split(rng, 4)
         time_until_next_cmd = jax.random.exponential(key1) * 5.0
         steps_until_next_cmd = jp.round(time_until_next_cmd / self.dt).astype(jp.int32)
-        command = self._sample_reset_command(key2, key3)
+        cmd_min, cmd_max, cmd_b = self._command_sampling_profile(jp.zeros(3))
+        raw_cmd = jax.random.uniform(key2, shape=(3,), minval=cmd_min, maxval=cmd_max)
+        if self._command_stage_name == "stage_2":
+            # episode 初始指令也用分类采样，与 sample_command 保持一致
+            idx = jax.random.randint(key3, shape=(), minval=0, maxval=len(_STAGE2_MOTION_PATTERNS))
+            command = raw_cmd * _STAGE2_MOTION_PATTERNS[idx]
+        else:
+            command = raw_cmd * jax.random.bernoulli(key3, cmd_b, shape=(3,))
 
         info = {
             "rng": rng,
@@ -565,52 +562,27 @@ class Joystick(go2_base.Go2Env):
     def _command_sampling_profile(self, current_command: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
         if self._command_stage_name == "stage_2":
             return self._student_stage2_sampling_profile(current_command)
-        # stage_1 sees symmetric command magnitudes but only one active axis.
-        return self._cmd_min, self._cmd_max, jp.ones_like(self._cmd_min)
+        return self._cmd_min, self._cmd_max, self._cmd_b
 
     def _student_stage2_sampling_profile(self, current_command: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
-        """Stage 2 command sampling: single-direction and yaw-coupled commands.
+        """Stage 2 command sampling: full multi-directional distribution.
 
         Uses the student_stage2_goal ranges from course_config.json:
-          vx ∈ [-0.8, 0.8], vy ∈ [-0.5, 0.5], yaw ∈ [-1.0, 1.0]
-          keep_prob is kept in config for compatibility, but command masks
-          explicitly prevent vx and vy from being active at the same time.
+          vx ∈ [-0.8, 0.8], vy ∈ [-0.4, 0.4], yaw ∈ [-1.0, 1.0]
+          keep_prob = [1.0, 0.7, 0.7]
         """
         del current_command
         return self._student_stage2_goal_min, self._student_stage2_goal_max, self._student_stage2_goal_b
 
-    def _sample_axis_only_command(
-        self,
-        value_rng: jax.Array,
-        axis_rng: jax.Array,
-        cmd_min: jax.Array,
-        cmd_max: jax.Array,
-    ) -> jax.Array:
-        raw_cmd = jax.random.uniform(value_rng, shape=(3,), minval=cmd_min, maxval=cmd_max)
-        idx = jax.random.randint(axis_rng, shape=(), minval=0, maxval=len(_AXIS_ONLY_MOTION_PATTERNS))
-        return raw_cmd * _AXIS_ONLY_MOTION_PATTERNS[idx]
-
-    def _sample_stage2_command(
-        self,
-        value_rng: jax.Array,
-        mode_rng: jax.Array,
-        cmd_min: jax.Array,
-        cmd_max: jax.Array,
-    ) -> jax.Array:
-        raw_cmd = jax.random.uniform(value_rng, shape=(3,), minval=cmd_min, maxval=cmd_max)
-        mode_idx = jax.random.categorical(mode_rng, _STAGE2_COMMAND_MASK_LOGITS)
-        return raw_cmd * _STAGE2_COMMAND_MASKS[mode_idx]
-
-    def _sample_reset_command(self, value_rng: jax.Array, aux_rng: jax.Array) -> jax.Array:
-        cmd_min, cmd_max, _ = self._command_sampling_profile(jp.zeros(3))
-        if self._command_stage_name == "stage_1":
-            return self._sample_axis_only_command(value_rng, aux_rng, cmd_min, cmd_max)
-        return self._sample_stage2_command(value_rng, aux_rng, cmd_min, cmd_max)
-
     def sample_command(self, rng: jax.Array, current_command: jax.Array) -> jax.Array:
-        cmd_min, cmd_max, _ = self._command_sampling_profile(current_command)
-        if self._command_stage_name == "stage_1":
-            value_rng, axis_rng = jax.random.split(rng)
-            return self._sample_axis_only_command(value_rng, axis_rng, cmd_min, cmd_max)
-        value_rng, mode_rng = jax.random.split(rng)
-        return self._sample_stage2_command(value_rng, mode_rng, cmd_min, cmd_max)
+        rng, y_rng, w_rng, z_rng = jax.random.split(rng, 4)
+        cmd_min, cmd_max, cmd_keep_prob = self._command_sampling_profile(current_command)
+        candidate = jax.random.uniform(y_rng, shape=(3,), minval=cmd_min, maxval=cmd_max)
+        if self._command_stage_name == "stage_2":
+            # 分类采样：从 3 种运动模式中均匀选一种（每种 1/3 ≈ 33.3%）
+            # 直接返回目标指令，不经过 blend，确保机器人真正看到纯单轴指令
+            idx = jax.random.randint(z_rng, shape=(), minval=0, maxval=len(_STAGE2_MOTION_PATTERNS))
+            return candidate * _STAGE2_MOTION_PATTERNS[idx]
+        active_mask = jax.random.bernoulli(z_rng, cmd_keep_prob, shape=(3,))
+        blend_mask = jax.random.bernoulli(w_rng, 0.5, shape=(3,))
+        return current_command - blend_mask * (current_command - candidate * active_mask)
